@@ -5,6 +5,14 @@ compressed streams. It includes also a gxz command for compressing and
 decompressing data. The package is completely written in Go and doesn't
 have any dependency on any C code.
 
+> **tank fork.** This is a fork of github.com/ulikunitz/xz used by the
+> tank load-generator. On top of upstream v0.5.17 the LZMA2 decode hot path
+> is allocation-free: the decoder applies each decoded symbol directly to
+> the dictionary instead of routing it through the `operation` interface,
+> which removed the single heap allocation per decoded symbol (the dominant
+> allocation on decode). The public API is unchanged. Optimizations live in
+> `lzma/decoder.go` (`decodeApply`).
+
 The package is currently under development. There might be bugs and APIs
 are not considered stable. At this time the package cannot compete with
 the xz tool regarding compression speed and size. The algorithms there

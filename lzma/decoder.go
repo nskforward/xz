@@ -189,6 +189,100 @@ func (d *decoder) apply(op operation) error {
 	return err
 }
 
+// decodeApply decodes the next symbol and applies it to the dictionary in one
+// step. Unlike readOp followed by apply it keeps the symbol out of the
+// operation interface, which removes one heap allocation per decoded symbol
+// (the dominant allocation on the decode path).
+func (d *decoder) decodeApply() error {
+	// Value of the end of stream (EOS) marker.
+	const eosDist = 1<<32 - 1
+
+	state, state2, posState := d.State.states(d.Dict.head)
+
+	b, err := d.State.isMatch[state2].Decode(d.rd)
+	if err != nil {
+		return err
+	}
+	if b == 0 {
+		// literal
+		litState := d.State.litState(d.Dict.byteAt(1), d.Dict.head)
+		matchByte := d.Dict.byteAt(int(d.State.rep[0]) + 1)
+		s, err := d.State.litCodec.Decode(d.rd, d.State.state, matchByte, litState)
+		if err != nil {
+			return err
+		}
+		d.State.updateStateLiteral()
+		return d.Dict.WriteByte(s)
+	}
+	b, err = d.State.isRep[state].Decode(d.rd)
+	if err != nil {
+		return err
+	}
+	if b == 0 {
+		// simple match
+		d.State.rep[3], d.State.rep[2], d.State.rep[1] =
+			d.State.rep[2], d.State.rep[1], d.State.rep[0]
+		d.State.updateStateMatch()
+		n, err := d.State.lenCodec.Decode(d.rd, posState)
+		if err != nil {
+			return err
+		}
+		d.State.rep[0], err = d.State.distCodec.Decode(d.rd, n)
+		if err != nil {
+			return err
+		}
+		if d.State.rep[0] == eosDist {
+			d.eosMarker = true
+			return errEOS
+		}
+		return d.Dict.writeMatch(int64(d.State.rep[0])+minDistance, int(n)+minMatchLen)
+	}
+	b, err = d.State.isRepG0[state].Decode(d.rd)
+	if err != nil {
+		return err
+	}
+	dist := d.State.rep[0]
+	if b == 0 {
+		// rep match 0
+		b, err = d.State.isRepG0Long[state2].Decode(d.rd)
+		if err != nil {
+			return err
+		}
+		if b == 0 {
+			d.State.updateStateShortRep()
+			return d.Dict.writeMatch(int64(dist)+minDistance, 1)
+		}
+	} else {
+		b, err = d.State.isRepG1[state].Decode(d.rd)
+		if err != nil {
+			return err
+		}
+		if b == 0 {
+			dist = d.State.rep[1]
+		} else {
+			b, err = d.State.isRepG2[state].Decode(d.rd)
+			if err != nil {
+				return err
+			}
+			if b == 0 {
+				dist = d.State.rep[2]
+			} else {
+				dist = d.State.rep[3]
+				d.State.rep[3] = d.State.rep[2]
+			}
+			d.State.rep[2] = d.State.rep[1]
+		}
+		d.State.rep[1] = d.State.rep[0]
+		d.State.rep[0] = dist
+	}
+	n, err := d.State.repLenCodec.Decode(d.rd, posState)
+	if err != nil {
+		return err
+	}
+	d.State.updateStateRep()
+	return d.Dict.writeMatch(int64(dist)+minDistance, int(n)+minMatchLen)
+}
+
 // decompress fills the dictionary unless no space for new data is
 // available. If the end of the LZMA stream has been reached io.EOF will
 // be returned.
@@ -197,7 +291,7 @@ func (d *decoder) decompress() error {
 		return io.EOF
 	}
 	for d.Dict.Available() >= maxMatchLen {
-		op, err := d.readOp()
+		err := d.decodeApply()
 		switch err {
 		case nil:
 			// break
@@ -214,9 +308,6 @@ func (d *decoder) decompress() error {
 			d.eos = true
 			return io.ErrUnexpectedEOF
 		default:
-			return err
-		}
-		if err = d.apply(op); err != nil {
 			return err
 		}
 		if d.size >= 0 && d.Decompressed() >= d.size {
