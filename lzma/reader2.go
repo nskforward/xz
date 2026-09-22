@@ -5,6 +5,7 @@
 package lzma
 
 import (
+	"bytes"
 	"errors"
 	"io"
 
@@ -46,6 +47,11 @@ type Reader2 struct {
 	ur          *uncompressedReader
 	decoder     *decoder
 	chunkReader io.Reader
+
+	// cbuf holds the compressed data of the current chunk. Reading the whole
+	// chunk at once avoids the byte-at-a-time reads of ByteReader, which cost
+	// one pread syscall per compressed byte when the source is a file.
+	cbuf []byte
 
 	cstate chunkState
 }
@@ -107,7 +113,19 @@ func (r *Reader2) startChunk() error {
 		r.chunkReader = r.ur
 		return nil
 	}
-	br := ByteReader(io.LimitReader(r.r, int64(header.compressed)+1))
+	// Read the whole compressed chunk into memory (at most 64 KiB) and decode
+	// from a bytes.Reader. Feeding the range decoder directly from the file
+	// reads one byte per Read call, i.e. one syscall per compressed byte.
+	n := int(header.compressed) + 1
+	if cap(r.cbuf) < n {
+		r.cbuf = make([]byte, n)
+	} else {
+		r.cbuf = r.cbuf[:n]
+	}
+	if _, err := io.ReadFull(r.r, r.cbuf); err != nil {
+		return err
+	}
+	br := bytes.NewReader(r.cbuf)
 	if r.decoder == nil {
 		state := newState(header.props)
 		r.decoder, err = newDecoder(br, state, r.dict, size)

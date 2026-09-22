@@ -6,12 +6,19 @@ decompressing data. The package is completely written in Go and doesn't
 have any dependency on any C code.
 
 > **tank fork.** This is a fork of github.com/ulikunitz/xz used by the
-> tank load-generator. On top of upstream v0.5.17 the LZMA2 decode hot path
-> is allocation-free: the decoder applies each decoded symbol directly to
-> the dictionary instead of routing it through the `operation` interface,
-> which removed the single heap allocation per decoded symbol (the dominant
-> allocation on decode). The public API is unchanged. Optimizations live in
-> `lzma/decoder.go` (`decodeApply`).
+> tank load-generator. On top of upstream v0.5.17 the LZMA2 decode path is
+> optimized for file sources:
+>
+> * `lzma/decoder.go` — symbols are applied directly to the dictionary
+>   (`decodeApply`) instead of being routed through the `operation` interface,
+>   removing one heap allocation per decoded symbol (the dominant allocation
+>   on decode).
+> * `lzma/reader2.go` — each compressed LZMA2 chunk (≤64 KiB) is read into
+>   memory and decoded from a `bytes.Reader`, instead of feeding the range
+>   decoder byte-at-a-time (one pread syscall per compressed byte, which made
+>   multi-threaded decoding slower than single-threaded).
+>
+> The public API is unchanged.
 
 The package is currently under development. There might be bugs and APIs
 are not considered stable. At this time the package cannot compete with
